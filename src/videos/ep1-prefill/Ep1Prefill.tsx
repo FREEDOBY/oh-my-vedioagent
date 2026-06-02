@@ -459,7 +459,7 @@ const SceneNumbers = () => {
   return (
     <SceneWrap dur={S.numbers}>
       <TwoLayer
-        label="④ 토큰은 사실 '숫자'다 — 임베딩"
+        label="③ 토큰은 사실 '숫자'다 — 임베딩"
         badge={{ text: "PREFILL", color: theme.colors.accent }}
         top={
           <div style={{ height: "100%", paddingTop: 30 }}>
@@ -523,7 +523,7 @@ const SceneRMSNorm = () => {
   return (
     <SceneWrap dur={S.rmsnorm}>
       <TwoLayer
-        label="⑤ 벡터 연산 — 크기 맞추기 (RMSNorm)"
+        label="④ 벡터 연산 — 크기 맞추기 (RMSNorm)"
         badge={{ text: "PREFILL", color: theme.colors.accent }}
         top={
           <div style={{ height: "100%", paddingTop: 30 }}>
@@ -621,14 +621,8 @@ const SceneRMSNorm = () => {
 };
 
 // ============================ 장면 4: 레이어 통과 (줌인) ============================
-const LAYER_STEPS = [
-  "임베딩",
-  "RMSNorm",
-  "RoPE(위치)",
-  "어텐션",
-  "RMSNorm",
-  "FFN",
-];
+// 한 레이어(트랜스포머 블록) 내부 연산. 임베딩은 레이어가 아니라 진입 전 1회이므로 제외.
+const LAYER_STEPS = ["RMSNorm", "RoPE", "어텐션", "+residual", "RMSNorm", "FFN", "+residual"];
 const SceneLayers = () => {
   const frame = useCurrentFrame();
   const { width } = useVideoConfig();
@@ -665,7 +659,7 @@ const SceneLayers = () => {
   return (
     <SceneWrap dur={S.layers}>
       <TwoLayer
-        label="⑥ 같은 숫자 연산 × 16 레이어"
+        label="⑤ 같은 숫자 연산 × 16 레이어"
         badge={{ text: "PREFILL", color: theme.colors.accent }}
         top={
           <div style={{ height: "100%", paddingTop: 30 }}>
@@ -716,8 +710,8 @@ const SceneLayers = () => {
                     <div style={{ fontSize: 20, color: theme.colors.muted, fontFamily: theme.fonts.mono }}>
                       Layer {i}
                     </div>
-                    <div style={{ fontSize: 16, color: theme.colors.muted }}>
-                      {LAYER_STEPS.slice(1).join(" · ")}
+                    <div style={{ fontSize: 14, color: theme.colors.muted, textAlign: "center", padding: "0 8px" }}>
+                      {LAYER_STEPS.join(" · ")}
                     </div>
                   </div>
                 );
@@ -765,7 +759,7 @@ const SceneKV = () => {
   return (
     <SceneWrap dur={S.kv}>
       <TwoLayer
-        label="④ K·V를 저장 — KV 캐시"
+        label="⑥ K·V를 저장 — KV 캐시"
         badge={{ text: "PREFILL", color: theme.colors.accent }}
         top={
           <div style={{ height: "100%", paddingTop: 30 }}>
@@ -788,9 +782,11 @@ const SceneKV = () => {
               ))}
             </div>
 
-            <div style={{ fontSize: 34, color: theme.colors.muted }}>↓ 각 토큰이 K(키)·V(값)를 만들어 저장 ↓</div>
+            <div style={{ fontSize: 30, color: theme.colors.muted }}>
+              ↓ 레이어마다 각 토큰이 K(키)·V(값)를 만들어 저장 (그림은 한 레이어) ↓
+            </div>
 
-            {/* KV 캐시: 총 12칸(나중에 더 자랄 공간), 지금 5칸 채움 */}
+            {/* KV 캐시: 총 12칸(decode 때 더 자랄 공간), 지금 5칸 채움 */}
             <KVCache
               total={12}
               filled={filled}
@@ -799,11 +795,14 @@ const SceneKV = () => {
               cellW={50}
               cellH={34}
             />
+            <div style={{ fontSize: 20, color: theme.colors.muted, fontFamily: theme.fonts.mono }}>
+              빈 칸 = decode 때 새 토큰이 채울 자리
+            </div>
 
             {frame > 520 && (
-              <Caption bottom={80}>
-                재계산을 피하려고 <span style={{ color: theme.colors.warn }}>버리지 않고 저장</span>한다.
-                {" "}프롬프트 {TOKENS.length}토큰 → 캐시 {TOKENS.length}칸
+              <Caption bottom={70}>
+                재계산을 피하려고 <span style={{ color: theme.colors.warn }}>버리지 않고 저장</span>한다 ·
+                {" "}실제론 <span style={{ color: theme.colors.accent }}>16개 레이어가 각자</span> K·V를 가진다
               </Caption>
             )}
             <SpecChips />
@@ -910,6 +909,7 @@ const SceneAttention = () => {
                   Q·K = 0.9×1.0 + 0.2×0.3 + 1.1×1.2 + (−0.3)×(−0.2) = <b style={{ color: theme.colors.warn }}>2.34</b>
                   {"  →  ÷√d = "}
                   <b style={{ color: theme.colors.warn }}>1.17</b>
+                  <span style={{ fontSize: 18, color: theme.colors.muted }}>{"   (예시는 4차원 ÷√4, 실제는 ÷√64)"}</span>
                 </div>
               )}
 
@@ -1003,7 +1003,7 @@ const SceneLogits = () => {
   return (
     <SceneWrap dur={S.logits}>
       <TwoLayer
-        label="⑥ 다음 토큰 예측 — argmax"
+        label="⑧ 다음 토큰 예측 — argmax"
         badge={{ text: "PREFILL", color: theme.colors.accent }}
         top={
           <div style={{ height: "100%", paddingTop: 30 }}>
