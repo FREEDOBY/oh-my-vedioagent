@@ -14,8 +14,8 @@ export const theme = {
     danger: "#f85149",
   },
   fonts: {
-    sans: "'Inter', system-ui, -apple-system, sans-serif",
-    mono: "'JetBrains Mono', 'Fira Code', monospace",
+    sans: "'Inter', 'Malgun Gothic', 'Noto Sans KR', system-ui, -apple-system, sans-serif",
+    mono: "'JetBrains Mono', 'Consolas', 'D2Coding', monospace",
   },
 } as const;
 
