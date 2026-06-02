@@ -12,6 +12,7 @@ import { ChatPanel } from "../../components/ChatPanel";
 import { TokenChip } from "../../components/TokenChip";
 import { KVCache } from "../../components/KVCache";
 import { ThreadGrid } from "../../components/ThreadGrid";
+import { NumVector } from "../../components/NumVector";
 
 // ========================================================================
 // EP1 — 질문을 읽는 순간 (Prefill)
@@ -20,7 +21,7 @@ import { ThreadGrid } from "../../components/ThreadGrid";
 
 const QUESTION = "대한민국 수도는?";
 
-// 설명용 근사 토큰 분할 (실제 BPE 경계와 다를 수 있음 / ID는 예시)
+// 설명용 근사 토큰 분할 (실제 BPE 경계와 다를 수 있음 / 숫자는 예시 값)
 const TOKENS = [
   { text: "대한", id: 31495 },
   { text: "민국", id: 80052 },
@@ -29,31 +30,49 @@ const TOKENS = [
   { text: "?", id: 30 },
 ];
 
+// "수도" 토큰의 임베딩 벡터 (예시 값, 2048차원 중 앞 8개만 표시)
+const EMBED_SUDO = [0.21, -0.83, 0.44, 0.1, -0.55, 0.92, -0.07, 0.38];
+
+// RMSNorm 실연산 예시 (가독성 위해 4개 원소만)
+const RMS_X = [0.5, -1.2, 0.8, 0.3];
+const RMS_SQ = RMS_X.map((v) => v * v); // [0.25, 1.44, 0.64, 0.09]
+const RMS_MEAN = RMS_SQ.reduce((a, b) => a + b, 0) / RMS_X.length; // 0.605
+const RMS_VAL = Math.sqrt(RMS_MEAN + 1e-5); // ≈ 0.778
+const RMS_W = [1.2, 0.8, 1.0, 1.1]; // 학습된 가중치
+const RMS_NORM = RMS_X.map((v) => v / RMS_VAL);
+const RMS_OUT = RMS_NORM.map((v, i) => v * RMS_W[i]);
+
+// 어텐션 실연산 예시 (4차원). "수도"의 Q가 앞 토큰들의 K와 내적.
+const Q_SUDO = [0.9, 0.2, 1.1, -0.3];
+const K_VECS: Record<string, number[]> = {
+  대한: [1.0, 0.3, 1.2, -0.2],
+  민국: [0.8, 0.1, 1.0, -0.3],
+  수도: [0.4, -0.1, 0.5, 0.2],
+};
+const ATTN_ORDER = ["대한", "민국", "수도"];
+const dot = (a: number[], b: number[]) => a.reduce((s, v, i) => s + v * b[i], 0);
+const ATTN_SCORES = ATTN_ORDER.map((t) => dot(Q_SUDO, K_VECS[t])); // [2.34, 1.93, 0.83]
+const SQRT_D = Math.sqrt(Q_SUDO.length); // 2
+const ATTN_SCALED = ATTN_SCORES.map((s) => s / SQRT_D);
+const ATTN_MAX = Math.max(...ATTN_SCALED);
+const ATTN_EXP = ATTN_SCALED.map((s) => Math.exp(s - ATTN_MAX));
+const ATTN_SUMEXP = ATTN_EXP.reduce((a, b) => a + b, 0);
+const ATTN_PROB = ATTN_EXP.map((e) => e / ATTN_SUMEXP);
+
 // 장면 길이 (frames @ 30fps)
 const S = {
   intro: 300,
   tokenize: 600,
-  prefill: 750,
-  layers: 1200,
-  kv: 1200,
-  attention: 1050,
+  prefill: 600,
+  numbers: 960, // 토큰 → 숫자 (임베딩)
+  rmsnorm: 1140, // 벡터 연산 (RMSNorm 실연산)
+  layers: 720, // 16 레이어 (요약)
+  kv: 1050,
+  attention: 1500, // 어텐션 (실제 내적·softmax 숫자)
   logits: 1050,
   first: 450,
 };
-export const EP1_DURATION =
-  S.intro + S.tokenize + S.prefill + S.layers + S.kv + S.attention + S.logits + S.first;
-
-// 누적 시작 프레임
-const START = {
-  intro: 0,
-  tokenize: S.intro,
-  prefill: S.intro + S.tokenize,
-  layers: S.intro + S.tokenize + S.prefill,
-  kv: S.intro + S.tokenize + S.prefill + S.layers,
-  attention: S.intro + S.tokenize + S.prefill + S.layers + S.kv,
-  logits: S.intro + S.tokenize + S.prefill + S.layers + S.kv + S.attention,
-  first: S.intro + S.tokenize + S.prefill + S.layers + S.kv + S.attention + S.logits,
-};
+export const EP1_DURATION = Object.values(S).reduce((a, b) => a + b, 0);
 
 // ---------- 공통 헬퍼 ----------
 
@@ -424,6 +443,183 @@ const ScenePrefill = () => {
   );
 };
 
+// ============================ 장면 N1: 토큰 → 숫자 (임베딩) ============================
+const SceneNumbers = () => {
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+
+  const idPop = spring({ frame: frame - 60, fps, config: { damping: 13 } });
+  const cellsShown = Math.floor(
+    interpolate(frame, [180, 380], [0, EMBED_SUDO.length], {
+      extrapolateLeft: "clamp",
+      extrapolateRight: "clamp",
+    })
+  );
+
+  return (
+    <SceneWrap dur={S.numbers}>
+      <TwoLayer
+        label="④ 토큰은 사실 '숫자'다 — 임베딩"
+        badge={{ text: "PREFILL", color: theme.colors.accent }}
+        top={
+          <div style={{ height: "100%", paddingTop: 30 }}>
+            <ChatPanel messages={[{ role: "user", text: QUESTION }]} compact />
+          </div>
+        }
+        bottom={
+          <AbsoluteFill style={{ alignItems: "center", justifyContent: "center", gap: 44 }}>
+            {/* 토큰 → ID */}
+            <div style={{ display: "flex", alignItems: "center", gap: 30 }}>
+              <TokenChip text="수도" active color={theme.colors.warn} scale={0.9} />
+              <div style={{ fontSize: 40, color: theme.colors.muted }}>→</div>
+              <div style={{ textAlign: "center", transform: `scale(${Math.min(idPop, 1)})` }}>
+                <div style={{ fontSize: 18, color: theme.colors.muted, fontFamily: theme.fonts.sans }}>
+                  토큰 번호 (ID)
+                </div>
+                <div style={{ fontSize: 56, fontWeight: 800, color: theme.colors.accent, fontFamily: theme.fonts.mono }}>
+                  28911
+                </div>
+              </div>
+            </div>
+
+            <div style={{ fontSize: 26, color: theme.colors.muted }}>
+              ↓ 이 번호로 임베딩 표에서 행 하나를 꺼낸다 ↓
+            </div>
+
+            {/* ID → 임베딩 벡터 (실수) */}
+            {frame > 160 && (
+              <NumVector
+                values={EMBED_SUDO.slice(0, cellsShown)}
+                tag="임베딩 벡터"
+                tagColor={theme.colors.accent2}
+                trailingDim={cellsShown >= EMBED_SUDO.length ? 2048 : null}
+              />
+            )}
+
+            {frame > 420 && (
+              <Caption bottom={80}>
+                토큰 하나 = <span style={{ color: theme.colors.accent2 }}>2048개의 실수(BF16)</span>.
+                {" "}이제부터 모든 게 이 숫자들의 곱셈·덧셈이다
+              </Caption>
+            )}
+            <SpecChips />
+          </AbsoluteFill>
+        }
+      />
+    </SceneWrap>
+  );
+};
+
+// ============================ 장면 N2: 벡터 연산 — RMSNorm 실연산 ============================
+const fmt = (n: number) => (n >= 0 ? "+" : "") + n.toFixed(2);
+const SceneRMSNorm = () => {
+  const frame = useCurrentFrame();
+
+  // 단계별 등장
+  const show = (t: number) => frame > t;
+  const stepOp = (t: number) =>
+    interpolate(frame, [t, t + 20], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+
+  return (
+    <SceneWrap dur={S.rmsnorm}>
+      <TwoLayer
+        label="⑤ 벡터 연산 — 크기 맞추기 (RMSNorm)"
+        badge={{ text: "PREFILL", color: theme.colors.accent }}
+        top={
+          <div style={{ height: "100%", paddingTop: 30 }}>
+            <ChatPanel messages={[{ role: "user", text: QUESTION }]} compact />
+          </div>
+        }
+        bottom={
+          <AbsoluteFill style={{ alignItems: "center", justifyContent: "center", gap: 14, paddingBottom: 150 }}>
+            <div style={{ fontSize: 22, color: theme.colors.muted, marginBottom: 2 }}>
+              (가독성 위해 2048개 중 4개만)
+            </div>
+
+            <NumVector values={RMS_X} tag="입력 x" format={fmt} cellH={46} fontSize={22} opacity={stepOp(20)} />
+
+            {show(120) && (
+              <NumVector
+                values={RMS_SQ}
+                tag="제곱 x²"
+                tagColor={theme.colors.warn}
+                format={fmt}
+                cellH={46}
+                fontSize={22}
+                opacity={stepOp(120)}
+              />
+            )}
+
+            {show(240) && (
+              <div
+                style={{
+                  opacity: stepOp(240),
+                  fontFamily: theme.fonts.mono,
+                  fontSize: 28,
+                  color: theme.colors.text,
+                  backgroundColor: theme.colors.surface,
+                  padding: "12px 24px",
+                  borderRadius: 10,
+                  border: `1px solid ${theme.colors.border}`,
+                }}
+              >
+                평균 = (0.25+1.44+0.64+0.09)/4 = <b style={{ color: theme.colors.warn }}>0.605</b>
+                {"  →  "}
+                √0.605 = <b style={{ color: theme.colors.warn }}>0.778</b> (RMS)
+              </div>
+            )}
+
+            {show(420) && (
+              <NumVector
+                values={RMS_NORM}
+                tag="÷ 0.778"
+                tagColor={theme.colors.accent2}
+                format={fmt}
+                cellH={46}
+                fontSize={22}
+                opacity={stepOp(420)}
+              />
+            )}
+
+            {show(560) && (
+              <NumVector
+                values={RMS_W}
+                tag="× 가중치 w"
+                tagColor={theme.colors.muted}
+                format={fmt}
+                cellH={46}
+                fontSize={22}
+                opacity={stepOp(560)}
+              />
+            )}
+
+            {show(680) && (
+              <NumVector
+                values={RMS_OUT}
+                tag="결과"
+                tagColor={theme.colors.accent}
+                format={fmt}
+                cellH={46}
+                fontSize={22}
+                highlight={[0, 1, 2, 3]}
+                opacity={stepOp(680)}
+              />
+            )}
+
+            {show(820) && (
+              <Caption bottom={70}>
+                각 숫자를 <span style={{ color: theme.colors.warn }}>RMS(0.778)로 나눠</span> 크기를 맞추고,
+                {" "}학습된 가중치를 곱한다 — 이게 한 번의 벡터 연산
+              </Caption>
+            )}
+            <SpecChips />
+          </AbsoluteFill>
+        }
+      />
+    </SceneWrap>
+  );
+};
+
 // ============================ 장면 4: 레이어 통과 (줌인) ============================
 const LAYER_STEPS = [
   "임베딩",
@@ -450,7 +646,7 @@ const SceneLayers = () => {
   const gap = 26;
   const step = blockW + gap;
   const totalBlocks = NUM_LAYERS;
-  const progress = interpolate(frame, [120, 1040], [0, 1], {
+  const progress = interpolate(frame, [80, 620], [0, 1], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
     easing: Easing.inOut(Easing.ease),
@@ -461,17 +657,15 @@ const SceneLayers = () => {
 
   // 스쳐 지나가는 내부 디테일 자막
   const subtitles: { t: [number, number]; text: string }[] = [
-    { t: [150, 290], text: "여기선 숫자 2048개 = BF16 벡터" },
-    { t: [300, 460], text: "회전으로 '몇 번째 토큰인지'를 새긴다 (RoPE)" },
-    { t: [470, 640], text: "어텐션 — 다른 토큰들을 참조" },
-    { t: [650, 820], text: "FFN — 비선형 변환으로 '생각'" },
-    { t: [900, 1080], text: "이걸 레이어 16개 반복" },
+    { t: [120, 300], text: "방금 본 벡터 연산(RMSNorm·어텐션·FFN)이 한 레이어" },
+    { t: [320, 540], text: "출력 2048개 숫자가 다음 레이어의 입력으로" },
+    { t: [560, 720], text: "이 숫자 연산을 레이어 16번 반복" },
   ];
 
   return (
     <SceneWrap dur={S.layers}>
       <TwoLayer
-        label="③ 한 토큰의 여정 — 레이어 16개"
+        label="⑥ 같은 숫자 연산 × 16 레이어"
         badge={{ text: "PREFILL", color: theme.colors.accent }}
         top={
           <div style={{ height: "100%", paddingTop: 30 }}>
@@ -620,29 +814,31 @@ const SceneKV = () => {
   );
 };
 
-// ============================ 장면 6: 어텐션 ============================
+// ============================ 장면 7: 어텐션 (실제 내적·softmax) ============================
 const SceneAttention = () => {
   const frame = useCurrentFrame();
   const { width } = useVideoConfig();
 
-  // 토큰 절대 위치 (어텐션 호를 그리기 위해)
   const n = TOKENS.length;
-  const stepX = 230;
+  const stepX = 200;
   const startX = width / 2 - ((n - 1) * stepX) / 2;
-  const rowY = 250;
+  const rowY = 150;
   const xs = TOKENS.map((_, i) => startX + i * stepX);
+  const focus = 2; // "수도"
 
-  // "수도"(index 2)가 앞 토큰들을 본다 — 인과적(왼쪽만)
-  const focus = 2;
-  const arcReveal = interpolate(frame, [120, 360], [0, 1], {
+  const arcReveal = interpolate(frame, [60, 240], [0, 1], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
+  const probsShown = frame > 980;
+
+  const stepOp = (t: number) =>
+    interpolate(frame, [t, t + 20], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
 
   return (
     <SceneWrap dur={S.attention}>
       <TwoLayer
-        label="⑤ 어텐션 — 토큰들이 서로를 본다"
+        label="⑦ 어텐션 = 실제 내적 + softmax"
         badge={{ text: "PREFILL", color: theme.colors.accent }}
         top={
           <div style={{ height: "100%", paddingTop: 30 }}>
@@ -651,19 +847,19 @@ const SceneAttention = () => {
         }
         bottom={
           <AbsoluteFill>
+            {/* 토큰 + 어텐션 호 (확률에 비례한 굵기) */}
             <svg style={{ position: "absolute", inset: 0 }} width="100%" height="100%">
-              {TOKENS.map((_, j) => {
-                if (j >= focus) return null; // 인과적: 자기보다 앞 토큰만
+              {ATTN_ORDER.map((t, j) => {
+                if (j >= focus) return null;
                 const x1 = xs[focus];
                 const x2 = xs[j];
-                const dist = focus - j;
-                const arcH = rowY - 80 - dist * 50;
-                const thickness = j === 0 || j === 1 ? 7 : 3; // 대한/민국으로 굵게
+                const arcH = rowY - 50 - (focus - j) * 40;
+                const thickness = probsShown ? 3 + ATTN_PROB[j] * 22 : 5;
                 const dashTotal = 600;
                 return (
                   <path
-                    key={j}
-                    d={`M ${x1} ${rowY - 30} Q ${(x1 + x2) / 2} ${arcH} ${x2} ${rowY - 30}`}
+                    key={t}
+                    d={`M ${x1} ${rowY + 30} Q ${(x1 + x2) / 2} ${arcH} ${x2} ${rowY + 30}`}
                     fill="none"
                     stroke={theme.colors.accent2}
                     strokeWidth={thickness}
@@ -674,33 +870,103 @@ const SceneAttention = () => {
                 );
               })}
             </svg>
-
-            {/* 토큰들 */}
             {TOKENS.map((tok, i) => (
-              <div
-                key={i}
-                style={{
-                  position: "absolute",
-                  left: xs[i],
-                  top: rowY,
-                  transform: "translate(-50%, -50%)",
-                }}
-              >
+              <div key={i} style={{ position: "absolute", left: xs[i], top: rowY, transform: "translate(-50%, -50%)" }}>
                 <TokenChip
                   text={tok.text}
                   active={i === focus}
                   color={i === focus ? theme.colors.warn : theme.colors.accent}
-                  scale={0.8}
-                  opacity={i <= focus ? 1 : 0.35}
+                  scale={0.62}
+                  opacity={i <= focus ? 1 : 0.3}
                 />
               </div>
             ))}
 
-            <Caption>
-              <span style={{ color: theme.colors.warn }}>'수도'</span>가{" "}
-              <span style={{ color: theme.colors.accent }}>'대한 · 민국'</span>을 참조하며 문맥이 생긴다 ·{" "}
-              <span style={{ color: theme.colors.muted, fontSize: 24 }}>미래 토큰은 못 본다(causal)</span>
-            </Caption>
+            {/* 숫자 연산 패널 */}
+            <div style={{ position: "absolute", top: 232, width: "100%", display: "flex", flexDirection: "column", alignItems: "center", gap: 14 }}>
+              {frame > 280 && (
+                <div style={{ opacity: stepOp(280) }}>
+                  <NumVector values={Q_SUDO} tag="Q (수도)" tagColor={theme.colors.warn} format={fmt} cellW={70} cellH={48} fontSize={22} />
+                </div>
+              )}
+              {frame > 380 && (
+                <div style={{ opacity: stepOp(380) }}>
+                  <NumVector values={K_VECS["대한"]} tag="K (대한)" tagColor={theme.colors.accent} format={fmt} cellW={70} cellH={48} fontSize={22} />
+                </div>
+              )}
+              {frame > 500 && (
+                <div
+                  style={{
+                    opacity: stepOp(500),
+                    fontFamily: theme.fonts.mono,
+                    fontSize: 25,
+                    color: theme.colors.text,
+                    backgroundColor: theme.colors.surface,
+                    padding: "12px 22px",
+                    borderRadius: 10,
+                    border: `1px solid ${theme.colors.border}`,
+                  }}
+                >
+                  Q·K = 0.9×1.0 + 0.2×0.3 + 1.1×1.2 + (−0.3)×(−0.2) = <b style={{ color: theme.colors.warn }}>2.34</b>
+                  {"  →  ÷√d = "}
+                  <b style={{ color: theme.colors.warn }}>1.17</b>
+                </div>
+              )}
+
+              {/* 점수 → softmax 표 */}
+              {frame > 660 && (
+                <div style={{ opacity: stepOp(660), marginTop: 8 }}>
+                  <table style={{ borderCollapse: "collapse", fontFamily: theme.fonts.mono, fontSize: 24 }}>
+                    <thead>
+                      <tr style={{ color: theme.colors.muted }}>
+                        <th style={{ padding: "6px 24px", textAlign: "left", fontWeight: 500 }}>토큰</th>
+                        <th style={{ padding: "6px 24px" }}>점수 ÷√d</th>
+                        <th style={{ padding: "6px 24px", color: probsShown ? theme.colors.accent2 : theme.colors.muted }}>
+                          확률 (softmax)
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ATTN_ORDER.map((t, j) => (
+                        <tr key={t} style={{ borderTop: `1px solid ${theme.colors.border}` }}>
+                          <td style={{ padding: "5px 24px", color: t === "대한" ? theme.colors.accent2 : theme.colors.text, fontWeight: 700 }}>
+                            {t}
+                          </td>
+                          <td style={{ padding: "5px 24px", textAlign: "center", color: theme.colors.text }}>
+                            {ATTN_SCALED[j].toFixed(2)}
+                          </td>
+                          <td style={{ padding: "5px 24px", textAlign: "center" }}>
+                            {probsShown ? (
+                              <span
+                                style={{
+                                  color: theme.colors.bg,
+                                  backgroundColor: theme.colors.accent2,
+                                  padding: "4px 12px",
+                                  borderRadius: 6,
+                                  fontWeight: 800,
+                                }}
+                              >
+                                {(ATTN_PROB[j] * 100).toFixed(0)}%
+                              </span>
+                            ) : (
+                              <span style={{ color: theme.colors.muted }}>?</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {frame > 1050 && (
+              <Caption bottom={32}>
+                <span style={{ color: theme.colors.warn }}>'수도'</span>의 주목은{" "}
+                <span style={{ color: theme.colors.accent2 }}>대한 44% · 민국 36% · 수도 21%</span>
+                {" "}— 이 확률로 V를 가중평균 (미래 토큰은 못 봄)
+              </Caption>
+            )}
             <SpecChips />
           </AbsoluteFill>
         }
@@ -881,33 +1147,33 @@ const SceneFirstToken = () => {
 };
 
 // ============================ 루트 ============================
+// 장면 순서 (각 장면 길이는 S 에서). 누적 시작 프레임은 자동 계산.
+const SCENE_LIST: { dur: number; Comp: React.FC }[] = [
+  { dur: S.intro, Comp: SceneIntro },
+  { dur: S.tokenize, Comp: SceneTokenize },
+  { dur: S.prefill, Comp: ScenePrefill },
+  { dur: S.numbers, Comp: SceneNumbers },
+  { dur: S.rmsnorm, Comp: SceneRMSNorm },
+  { dur: S.layers, Comp: SceneLayers },
+  { dur: S.kv, Comp: SceneKV },
+  { dur: S.attention, Comp: SceneAttention },
+  { dur: S.logits, Comp: SceneLogits },
+  { dur: S.first, Comp: SceneFirstToken },
+];
+
 export const Ep1Prefill: React.FC = () => {
+  let offset = 0;
   return (
     <AbsoluteFill style={{ backgroundColor: theme.colors.bg }}>
-      <Sequence from={START.intro} durationInFrames={S.intro}>
-        <SceneIntro />
-      </Sequence>
-      <Sequence from={START.tokenize} durationInFrames={S.tokenize}>
-        <SceneTokenize />
-      </Sequence>
-      <Sequence from={START.prefill} durationInFrames={S.prefill}>
-        <ScenePrefill />
-      </Sequence>
-      <Sequence from={START.layers} durationInFrames={S.layers}>
-        <SceneLayers />
-      </Sequence>
-      <Sequence from={START.kv} durationInFrames={S.kv}>
-        <SceneKV />
-      </Sequence>
-      <Sequence from={START.attention} durationInFrames={S.attention}>
-        <SceneAttention />
-      </Sequence>
-      <Sequence from={START.logits} durationInFrames={S.logits}>
-        <SceneLogits />
-      </Sequence>
-      <Sequence from={START.first} durationInFrames={S.first}>
-        <SceneFirstToken />
-      </Sequence>
+      {SCENE_LIST.map(({ dur, Comp }, i) => {
+        const from = offset;
+        offset += dur;
+        return (
+          <Sequence key={i} from={from} durationInFrames={dur}>
+            <Comp />
+          </Sequence>
+        );
+      })}
     </AbsoluteFill>
   );
 };
