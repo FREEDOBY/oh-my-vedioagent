@@ -59,6 +59,26 @@ const ATTN_EXP = ATTN_SCALED.map((s) => Math.exp(s - ATTN_MAX));
 const ATTN_SUMEXP = ATTN_EXP.reduce((a, b) => a + b, 0);
 const ATTN_PROB = ATTN_EXP.map((e) => e / ATTN_SUMEXP);
 
+// K·V 생성(투영) 실연산. 토큰 벡터 x 에 학습된 가중치 행렬을 곱해 K·V 를 만든다.
+// x = 직전 RMSNorm 출력(RMS_OUT). 실제론 d×d(2048×2048) 행렬, 여기선 4×4 예시.
+const KV_X = RMS_OUT; // ≈ [0.77, -1.23, 1.03, 0.42]
+const W_K_MAT = [
+  [0.3, -0.2, 0.4, 0.1],
+  [-0.4, 0.5, 0.2, -0.3],
+  [0.5, 0.2, -0.4, 0.4],
+  [0.2, -0.4, 0.3, 0.5],
+];
+const W_V_MAT = [
+  [0.2, 0.4, -0.1, 0.3],
+  [0.5, -0.3, 0.5, 0.2],
+  [-0.2, 0.4, 0.3, -0.4],
+  [0.6, 0.1, -0.5, 0.5],
+];
+const matVec = (v: number[], W: number[][]) =>
+  W[0].map((_, j) => v.reduce((s, vi, i) => s + vi * W[i][j], 0));
+const K_GEN = matVec(KV_X, W_K_MAT); // ≈ [1.32, -0.74, -0.22, 1.07]
+const V_GEN = matVec(KV_X, W_V_MAT); // ≈ [-0.41, 1.13, -0.60, -0.21]
+
 // 장면 길이 (frames @ 30fps)
 const S = {
   intro: 300,
@@ -67,6 +87,7 @@ const S = {
   numbers: 960, // 토큰 → 숫자 (임베딩)
   rmsnorm: 1140, // 벡터 연산 (RMSNorm 실연산)
   layers: 720, // 16 레이어 (요약)
+  kvgen: 1020, // K·V 생성(투영) — x·Wk, x·Wv
   kv: 1050,
   attention: 1500, // 어텐션 (실제 내적·softmax 숫자)
   logits: 1050,
@@ -104,12 +125,14 @@ const TwoLayer: React.FC<{
   bottom: React.ReactNode;
   label?: string;
   badge?: { text: string; color: string } | null;
-}> = ({ top, bottom, label, badge }) => {
+  stage?: number; // prefill 파이프라인 진행바: 현재 단계 인덱스 (없으면 표시 안 함)
+  subStage?: string; // "레이어 ×16" 내부 세부 단계 라벨
+}> = ({ top, bottom, label, badge, stage, subStage }) => {
   return (
     <AbsoluteFill style={{ flexDirection: "column" }}>
       <div
         style={{
-          height: "30%",
+          height: "22%",
           borderBottom: `2px solid ${theme.colors.border}`,
           backgroundColor: theme.colors.bg,
           position: "relative",
@@ -177,6 +200,7 @@ const TwoLayer: React.FC<{
           </div>
         )}
         {bottom}
+        {typeof stage === "number" && <PrefillProgress active={stage} sub={subStage} />}
       </div>
     </AbsoluteFill>
   );
@@ -233,6 +257,74 @@ const Caption: React.FC<{ children: React.ReactNode; bottom?: number }> = ({
     }}
   >
     {children}
+  </div>
+);
+
+// prefill 파이프라인 단계 (진행바 + 로드맵 공용)
+const PIPE_STAGES = ["토큰화", "임베딩", "레이어", "logits", "첫 토큰"];
+
+// 엔진 씬 상단에 상시 표시되는 진행바: ●━━●━━◉━━○━━○
+const PrefillProgress: React.FC<{ active: number; sub?: string }> = ({ active, sub }) => (
+  <div
+    style={{
+      position: "absolute",
+      top: 18,
+      left: "50%",
+      transform: "translateX(-50%)",
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      gap: 6,
+      padding: "10px 22px",
+      borderRadius: 16,
+      backgroundColor: "rgba(13,17,23,0.94)",
+      border: `1px solid ${theme.colors.border}`,
+    }}
+  >
+    <div style={{ display: "flex" }}>
+      {PIPE_STAGES.map((label, i) => {
+        const done = i < active;
+        const cur = i === active;
+        const color = cur ? theme.colors.warn : done ? theme.colors.accent : theme.colors.border;
+        const lineL = i === 0 ? "transparent" : i <= active ? theme.colors.accent : theme.colors.border;
+        const lineR = i === PIPE_STAGES.length - 1 ? "transparent" : i < active ? theme.colors.accent : theme.colors.border;
+        return (
+          <div key={i} style={{ width: 138, display: "flex", flexDirection: "column", alignItems: "center", gap: 7 }}>
+            <div style={{ display: "flex", alignItems: "center", width: "100%" }}>
+              <div style={{ flex: 1, height: 4, borderRadius: 2, backgroundColor: lineL }} />
+              <div
+                style={{
+                  width: cur ? 26 : 18,
+                  height: cur ? 26 : 18,
+                  borderRadius: "50%",
+                  flexShrink: 0,
+                  backgroundColor: done || cur ? color : "transparent",
+                  border: `3px solid ${color}`,
+                  boxShadow: cur ? `0 0 18px ${theme.colors.warn}` : "none",
+                }}
+              />
+              <div style={{ flex: 1, height: 4, borderRadius: 2, backgroundColor: lineR }} />
+            </div>
+            <div
+              style={{
+                fontSize: 20,
+                fontFamily: theme.fonts.mono,
+                color: cur ? theme.colors.text : theme.colors.muted,
+                fontWeight: cur ? 800 : 500,
+                whiteSpace: "nowrap",
+              }}
+            >
+              {label}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+    {sub && (
+      <div style={{ fontSize: 18, fontWeight: 700, fontFamily: theme.fonts.mono, color: theme.colors.warn, whiteSpace: "nowrap" }}>
+        ↳ {sub}
+      </div>
+    )}
   </div>
 );
 
@@ -443,7 +535,7 @@ const ScenePrefill = () => {
   );
 };
 
-// ============================ 장면 N1: 토큰 → 숫자 (임베딩) ============================
+// ============================ 장면 ③: 토큰 → 숫자 (임베딩) ============================
 const SceneNumbers = () => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
@@ -460,6 +552,7 @@ const SceneNumbers = () => {
     <SceneWrap dur={S.numbers}>
       <TwoLayer
         label="③ 토큰은 사실 '숫자'다 — 임베딩"
+        stage={1}
         badge={{ text: "PREFILL", color: theme.colors.accent }}
         top={
           <div style={{ height: "100%", paddingTop: 30 }}>
@@ -523,7 +616,9 @@ const SceneRMSNorm = () => {
   return (
     <SceneWrap dur={S.rmsnorm}>
       <TwoLayer
-        label="④ 벡터 연산 — 크기 맞추기 (RMSNorm)"
+        label="④ 크기 맞추기 — RMSNorm"
+        stage={2}
+        subStage="RMSNorm"
         badge={{ text: "PREFILL", color: theme.colors.accent }}
         top={
           <div style={{ height: "100%", paddingTop: 30 }}>
@@ -622,44 +717,59 @@ const SceneRMSNorm = () => {
 
 // ============================ 장면 4: 레이어 통과 (줌인) ============================
 // 한 레이어(트랜스포머 블록) 내부 연산. 임베딩은 레이어가 아니라 진입 전 1회이므로 제외.
-const LAYER_STEPS = ["RMSNorm", "RoPE", "어텐션", "+residual", "RMSNorm", "FFN", "+residual"];
+// Llama 디코더 블록 구조 (reference.py: input_layernorm→self_attn→+residual→post_attention_layernorm→mlp→+residual, ×16, 그 위 norm→lm_head)
 const SceneLayers = () => {
   const frame = useCurrentFrame();
   const { width } = useVideoConfig();
+  const cx = width / 2;
 
-  // 한 토큰("수도")으로 줌인
-  const zoom = interpolate(frame, [0, 90], [0, 1], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-    easing: Easing.inOut(Easing.ease),
-  });
+  const boxH = 40;
+  const pitch = 54;
+  const yc = (i: number) => 170 + i * pitch; // 박스 i의 중심 y (0=위, 10=아래)
 
-  const NUM_LAYERS = 16;
-  // 파이프라인 진행: 패킷은 화면 중앙 고정, 파이프라인이 왼쪽으로 슬라이드
-  const blockW = 150;
-  const gap = 26;
-  const step = blockW + gap;
-  const totalBlocks = NUM_LAYERS;
-  const progress = interpolate(frame, [80, 620], [0, 1], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-    easing: Easing.inOut(Easing.ease),
-  });
-  const currentBlock = progress * (totalBlocks - 1);
-  const centerX = width / 2;
-  const panX = centerX - blockW / 2 - currentBlock * step;
-
-  // 스쳐 지나가는 내부 디테일 자막
-  const subtitles: { t: [number, number]; text: string }[] = [
-    { t: [120, 300], text: "방금 본 벡터 연산(RMSNorm·어텐션·FFN)이 한 레이어" },
-    { t: [320, 540], text: "출력 2048개 숫자가 다음 레이어의 입력으로" },
-    { t: [560, 720], text: "이 숫자 연산을 레이어 16번 반복" },
+  type Row = { id: string; label: string; w: number; color: string; fill?: boolean; add?: boolean; big?: boolean };
+  const ROWS: Row[] = [
+    { id: "out", label: "다음 토큰  '서'", w: 250, color: theme.colors.accent2, fill: true, big: true },
+    { id: "softmax", label: "Softmax", w: 200, color: theme.colors.accent2 },
+    { id: "linear", label: "Linear  (lm_head)", w: 270, color: theme.colors.muted },
+    { id: "fnorm", label: "최종 RMSNorm", w: 250, color: theme.colors.warn },
+    { id: "add2", label: "⊕", w: 60, color: theme.colors.text, add: true },
+    { id: "ffn", label: "Feed-Forward  (SwiGLU)", w: 420, color: theme.colors.accent },
+    { id: "norm2", label: "RMSNorm", w: 220, color: theme.colors.warn },
+    { id: "add1", label: "⊕", w: 60, color: theme.colors.text, add: true },
+    { id: "attn", label: "Self-Attention  ·  RoPE · causal · KV캐시", w: 540, color: theme.colors.accent },
+    { id: "norm1", label: "RMSNorm", w: 220, color: theme.colors.warn },
+    { id: "emb", label: "토큰 임베딩", w: 250, color: theme.colors.danger, fill: true },
   ];
+  const idx = (id: string) => ROWS.findIndex((r) => r.id === id);
+
+  // 구조 등장 (아래→위 스태거)
+  const appear = (i: number) =>
+    interpolate(frame, [10 + (10 - i) * 5, 46 + (10 - i) * 5], [0, 1], {
+      extrapolateLeft: "clamp",
+      extrapolateRight: "clamp",
+    });
+  // 데이터 흐름 신호: 임베딩(i=10, 아래) → 출력(i=0, 위)
+  const sig = interpolate(frame, [110, 560], [10.6, -0.6], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const lit = (i: number) => sig <= i + 0.5;
+  const cur = (i: number) => Math.abs(i - sig) < 0.55;
+
+  // ×16 컨테이너 (add2~norm1 감쌈)
+  const blkW = 580;
+  const blkTop = yc(idx("add2")) - boxH / 2 - 14;
+  const blkBot = yc(idx("norm1")) + boxH / 2 + 14;
+  const blkH = blkBot - blkTop;
+
+  // residual 스킵 좌표
+  const entryY = (yc(idx("norm1")) + yc(idx("emb"))) / 2; // 블록 입력
+  const add1Y = yc(idx("add1"));
+  const add2Y = yc(idx("add2"));
+  const sigYclamped = yc(Math.max(0, Math.min(10, sig)));
 
   return (
     <SceneWrap dur={S.layers}>
       <TwoLayer
-        label="⑤ 같은 숫자 연산 × 16 레이어"
+        label="모델 구조 — 한 토큰이 통과할 전체 길"
         badge={{ text: "PREFILL", color: theme.colors.accent }}
         top={
           <div style={{ height: "100%", paddingTop: 30 }}>
@@ -668,74 +778,132 @@ const SceneLayers = () => {
         }
         bottom={
           <AbsoluteFill>
-            {/* 파이프라인 (슬라이드) */}
+            {/* 흐름 스파인 + residual 스킵 */}
+            <svg style={{ position: "absolute", inset: 0 }} width="100%" height="100%">
+              <line x1={cx} y1={yc(idx("emb"))} x2={cx} y2={yc(0)} stroke={theme.colors.border} strokeWidth={4} />
+              <line x1={cx} y1={yc(idx("emb"))} x2={cx} y2={sigYclamped} stroke={theme.colors.accent} strokeWidth={4} />
+              {/* attn residual: 블록 입력 → ⊕(add1) */}
+              <path
+                d={`M ${cx} ${entryY} C ${cx + 380} ${entryY}, ${cx + 380} ${add1Y}, ${cx + 42} ${add1Y}`}
+                fill="none"
+                stroke={theme.colors.accent2}
+                strokeWidth={3}
+                opacity={appear(idx("add1"))}
+              />
+              <polygon points={`${cx + 42},${add1Y} ${cx + 56},${add1Y - 7} ${cx + 56},${add1Y + 7}`} fill={theme.colors.accent2} opacity={appear(idx("add1"))} />
+              {/* ffn residual: add1 출력 → ⊕(add2) */}
+              <path
+                d={`M ${cx} ${add1Y} C ${cx + 470} ${add1Y}, ${cx + 470} ${add2Y}, ${cx + 42} ${add2Y}`}
+                fill="none"
+                stroke={theme.colors.accent2}
+                strokeWidth={3}
+                opacity={appear(idx("add2"))}
+              />
+              <polygon points={`${cx + 42},${add2Y} ${cx + 56},${add2Y - 7} ${cx + 56},${add2Y + 7}`} fill={theme.colors.accent2} opacity={appear(idx("add2"))} />
+            </svg>
+
+            {/* ×16 고스트 스택 + 컨테이너 */}
+            {[16, 8].map((g, k) => (
+              <div
+                key={k}
+                style={{
+                  position: "absolute",
+                  left: cx - blkW / 2 - (k + 1) * 9,
+                  top: blkTop - (k + 1) * 9,
+                  width: blkW,
+                  height: blkH,
+                  borderRadius: 16,
+                  border: `2px solid ${theme.colors.border}`,
+                  opacity: 0.4 * appear(idx("add2")),
+                }}
+              />
+            ))}
             <div
               style={{
                 position: "absolute",
-                top: 230,
-                left: 0,
-                transform: `translateX(${panX}px)`,
-                display: "flex",
-                gap,
-                opacity: zoom,
+                left: cx - blkW / 2,
+                top: blkTop,
+                width: blkW,
+                height: blkH,
+                borderRadius: 16,
+                border: `2px solid ${theme.colors.accent}77`,
+                backgroundColor: "rgba(88,166,255,0.05)",
+                opacity: appear(idx("add2")),
               }}
-            >
-              {Array.from({ length: NUM_LAYERS }).map((_, i) => {
-                const isDone = i < currentBlock - 0.3;
-                const isActive = Math.abs(i - currentBlock) < 0.6;
-                const color = isActive
-                  ? theme.colors.accent
-                  : isDone
-                    ? theme.colors.accent2
-                    : theme.colors.border;
-                return (
-                  <div
-                    key={i}
-                    style={{
-                      width: blockW,
-                      height: 150,
-                      borderRadius: 12,
-                      border: `2px solid ${color}`,
-                      backgroundColor: isActive ? theme.colors.accent + "22" : theme.colors.surface,
-                      boxShadow: isActive ? `0 0 24px ${theme.colors.accent}88` : "none",
-                      display: "flex",
-                      flexDirection: "column",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      gap: 8,
-                      color: theme.colors.text,
-                      fontFamily: theme.fonts.sans,
-                    }}
-                  >
-                    <div style={{ fontSize: 20, color: theme.colors.muted, fontFamily: theme.fonts.mono }}>
-                      Layer {i}
-                    </div>
-                    <div style={{ fontSize: 14, color: theme.colors.muted, textAlign: "center", padding: "0 8px" }}>
-                      {LAYER_STEPS.join(" · ")}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* 패킷 (중앙 고정 토큰) */}
+            />
+            {/* ×16 라벨 (왼쪽) */}
             <div
               style={{
                 position: "absolute",
-                top: 250,
-                left: centerX,
-                transform: `translateX(-50%) scale(${0.6 + 0.4 * zoom})`,
-                zIndex: 5,
+                left: cx - blkW / 2 - 150,
+                top: blkTop + blkH / 2 - 34,
+                width: 130,
+                textAlign: "right",
+                opacity: appear(idx("add2")),
               }}
             >
-              <TokenChip text="수도" active color={theme.colors.warn} />
+              <div style={{ fontSize: 44, fontWeight: 900, color: theme.colors.accent, fontFamily: theme.fonts.mono, lineHeight: 1 }}>×16</div>
+              <div style={{ fontSize: 16, color: theme.colors.muted, marginTop: 4 }}>같은 블록 16번</div>
+              <div style={{ fontSize: 15, color: theme.colors.warn, marginTop: 10 }}>프리노름 — 노름을<br />블록 안에서 먼저</div>
             </div>
 
-            {subtitles.map((s, i) =>
-              frame >= s.t[0] && frame <= s.t[1] ? (
-                <Caption key={i}>{s.text}</Caption>
-              ) : null
-            )}
+            {/* residual 라벨 (오른쪽) */}
+            <div
+              style={{
+                position: "absolute",
+                left: cx + 490,
+                top: (add1Y + add2Y) / 2 - 26,
+                width: 150,
+                fontSize: 17,
+                color: theme.colors.accent2,
+                fontFamily: theme.fonts.sans,
+                opacity: appear(idx("add1")),
+              }}
+            >
+              <b>residual</b>
+              <br />입력을 그대로 더함
+            </div>
+
+            <Caption bottom={26}>
+              <span style={{ whiteSpace: "nowrap" }}>먼저 전체 구조부터 —</span>{" "}
+              <span style={{ whiteSpace: "nowrap" }}>지금부터 이 길을 <span style={{ color: theme.colors.accent2 }}>아래에서 위로</span> 하나씩 따라간다</span>
+            </Caption>
+
+            {/* 박스들 */}
+            {ROWS.map((r, i) => {
+              const on = lit(i);
+              const isCur = cur(i);
+              const bc = isCur ? theme.colors.warn : on ? r.color : theme.colors.border;
+              return (
+                <div
+                  key={r.id}
+                  style={{
+                    position: "absolute",
+                    left: cx - r.w / 2,
+                    top: yc(i) - boxH / 2,
+                    width: r.w,
+                    height: boxH,
+                    borderRadius: r.add ? "50%" : 10,
+                    border: `2px solid ${bc}`,
+                    backgroundColor: r.fill ? r.color + "22" : isCur ? theme.colors.warn + "22" : theme.colors.surface,
+                    boxShadow: isCur ? `0 0 18px ${theme.colors.warn}` : "none",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontFamily: theme.fonts.sans,
+                    fontWeight: r.big ? 800 : 700,
+                    fontSize: r.add ? 24 : r.big ? 22 : 18,
+                    color: on || r.fill ? theme.colors.text : theme.colors.muted,
+                    opacity: appear(i),
+                    whiteSpace: "nowrap",
+                    zIndex: 3,
+                  }}
+                >
+                  {r.label}
+                </div>
+              );
+            })}
+
             <SpecChips />
           </AbsoluteFill>
         }
@@ -745,6 +913,155 @@ const SceneLayers = () => {
 };
 
 // ============================ 장면 5: KV 캐시 채우기 ============================
+// ============================ 장면 6-A: K·V 생성 (투영) ============================
+// 토큰 벡터 x 에 학습된 Wk·Wv 를 곱해 K·V 를 "만든다". 이게 다음 씬에서 캐시에 저장될 실체.
+const NumMatrix: React.FC<{
+  rows: number[][];
+  tag?: string;
+  tagColor?: string;
+  cellW?: number;
+  cellH?: number;
+  fontSize?: number;
+  highlightCol?: number | null;
+  opacity?: number;
+}> = ({
+  rows,
+  tag,
+  tagColor = theme.colors.muted,
+  cellW = 56,
+  cellH = 38,
+  fontSize = 19,
+  highlightCol = null,
+  opacity = 1,
+}) => (
+  <div style={{ display: "flex", alignItems: "center", gap: 12, opacity }}>
+    {tag && (
+      <div style={{ minWidth: 52, textAlign: "right", fontSize: 22, fontWeight: 700, color: tagColor, fontFamily: theme.fonts.sans }}>
+        {tag}
+      </div>
+    )}
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "10px 14px", border: `1px solid ${theme.colors.border}`, borderRadius: 12, backgroundColor: theme.colors.surface }}>
+      {rows.map((row, ri) => (
+        <div key={ri} style={{ display: "flex", gap: 6 }}>
+          {row.map((v, ci) => {
+            const hl = ci === highlightCol;
+            return (
+              <div
+                key={ci}
+                style={{
+                  width: cellW,
+                  height: cellH,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  borderRadius: 6,
+                  fontFamily: theme.fonts.mono,
+                  fontSize,
+                  fontWeight: 600,
+                  color: hl ? theme.colors.text : theme.colors.muted,
+                  backgroundColor: hl ? theme.colors.warn + "22" : "transparent",
+                  border: `1px solid ${hl ? theme.colors.warn : "transparent"}`,
+                }}
+              >
+                {(v >= 0 ? "+" : "−") + Math.abs(v).toFixed(1)}
+              </div>
+            );
+          })}
+        </div>
+      ))}
+    </div>
+  </div>
+);
+
+const Op: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <span style={{ fontSize: 40, fontWeight: 700, color: theme.colors.muted, fontFamily: theme.fonts.mono, margin: "0 14px" }}>
+    {children}
+  </span>
+);
+
+const SceneKVGen = () => {
+  const frame = useCurrentFrame();
+  const stepOp = (t: number) =>
+    interpolate(frame, [t, t + 24], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+
+  const showExpand = frame > 200;
+  // K₀ = x · (Wk의 0열) 전개 문자열. 음수는 괄호로 감싸 가독성 확보.
+  const term = (a: number, b: number) => {
+    const w = (n: number) => (n < 0 ? `(−${Math.abs(n).toFixed(2)})` : n.toFixed(2));
+    const wb = (n: number) => (n < 0 ? `(−${Math.abs(n).toFixed(1)})` : n.toFixed(1));
+    return `${w(a)}×${wb(b)}`;
+  };
+  const k0Terms = KV_X.map((xi, i) => term(xi, W_K_MAT[i][0])).join(" + ");
+
+  return (
+    <SceneWrap dur={S.kvgen}>
+      <TwoLayer
+        label="⑤ K·V를 만든다"
+        stage={2}
+        subStage="K·V 생성"
+        badge={{ text: "PREFILL", color: theme.colors.accent }}
+        top={
+          <div style={{ height: "100%", paddingTop: 30 }}>
+            <ChatPanel messages={[{ role: "user", text: QUESTION }]} compact />
+          </div>
+        }
+        bottom={
+          <AbsoluteFill style={{ alignItems: "center", justifyContent: "center", gap: 24, paddingTop: 30 }}>
+            <div style={{ fontSize: 26, color: theme.colors.muted, fontFamily: theme.fonts.sans, textAlign: "center" }}>
+              방금 정규화한 토큰 벡터 <span style={{ color: theme.colors.warn, fontWeight: 700 }}>x</span> 에{" "}
+              <span style={{ color: theme.colors.accent, fontWeight: 700 }}>학습된 행렬 Wₖ·Wᵥ</span> 를 곱하면 K·V 가 나온다
+            </div>
+
+            {/* x · Wk = K */}
+            <div style={{ display: "flex", alignItems: "center", opacity: stepOp(40) }}>
+              <NumVector values={KV_X} tag="x" tagColor={theme.colors.warn} format={fmt} cellW={62} cellH={46} fontSize={20} highlight={showExpand ? [0, 1, 2, 3] : []} />
+              <Op>×</Op>
+              <NumMatrix rows={W_K_MAT} tag="Wₖ" tagColor={theme.colors.accent} highlightCol={showExpand ? 0 : null} opacity={stepOp(70)} />
+              <Op>=</Op>
+              <div style={{ opacity: stepOp(110) }}>
+                <NumVector values={K_GEN} tag="K" tagColor={theme.colors.accent} format={fmt} cellW={62} cellH={46} fontSize={20} highlight={showExpand ? [0] : []} />
+              </div>
+            </div>
+
+            {/* K₀ 전개 */}
+            {showExpand && (
+              <div style={{ opacity: stepOp(200), fontFamily: theme.fonts.mono, fontSize: 22, color: theme.colors.text, backgroundColor: theme.colors.surface, padding: "10px 20px", borderRadius: 10, border: `1px solid ${theme.colors.border}` }}>
+                K₀ = {k0Terms} = <b style={{ color: theme.colors.warn }}>{fmt(K_GEN[0])}</b>
+                <span style={{ fontSize: 17, color: theme.colors.muted }}>{"   (x 와 Wₖ의 1열을 내적)"}</span>
+              </div>
+            )}
+
+            {/* x · Wv = V */}
+            <div style={{ display: "flex", alignItems: "center", opacity: stepOp(330) }}>
+              <NumVector values={KV_X} tag="x" tagColor={theme.colors.warn} format={fmt} cellW={62} cellH={46} fontSize={20} />
+              <Op>×</Op>
+              <NumMatrix rows={W_V_MAT} tag="Wᵥ" tagColor={theme.colors.accent2} opacity={stepOp(360)} />
+              <Op>=</Op>
+              <div style={{ opacity: stepOp(400) }}>
+                <NumVector values={V_GEN} tag="V" tagColor={theme.colors.accent2} format={fmt} cellW={62} cellH={46} fontSize={20} />
+              </div>
+            </div>
+
+            {frame > 560 && (
+              <Caption bottom={60}>
+                <span style={{ whiteSpace: "nowrap" }}>
+                  이렇게 만든 <span style={{ color: theme.colors.accent }}>K</span>·<span style={{ color: theme.colors.accent2 }}>V</span> 로{" "}
+                  <span style={{ color: theme.colors.warn }}>어텐션</span>으로
+                </span>{" · "}
+                <span style={{ whiteSpace: "nowrap" }}>Q 도 같은 방식 (x·W_Q)</span>{" · "}
+                <span style={{ whiteSpace: "nowrap" }}>
+                  실제론 <span style={{ color: theme.colors.accent }}>d=2048, 레이어 16개가 각자</span>
+                </span>
+              </Caption>
+            )}
+            <SpecChips />
+          </AbsoluteFill>
+        }
+      />
+    </SceneWrap>
+  );
+};
+
 const SceneKV = () => {
   const frame = useCurrentFrame();
 
@@ -759,7 +1076,9 @@ const SceneKV = () => {
   return (
     <SceneWrap dur={S.kv}>
       <TwoLayer
-        label="⑥ K·V를 저장 — KV 캐시"
+        label="⑦ K·V를 캐시에 남긴다"
+        stage={2}
+        subStage="K·V 캐시"
         badge={{ text: "PREFILL", color: theme.colors.accent }}
         top={
           <div style={{ height: "100%", paddingTop: 30 }}>
@@ -783,7 +1102,7 @@ const SceneKV = () => {
             </div>
 
             <div style={{ fontSize: 30, color: theme.colors.muted }}>
-              ↓ 레이어마다 각 토큰이 K(키)·V(값)를 만들어 저장 (그림은 한 레이어) ↓
+              ↓ 어텐션에 쓴 각 토큰의 K(키)·V(값)를 버리지 않고 캐시에 남긴다 (그림은 한 레이어) ↓
             </div>
 
             {/* KV 캐시: 총 12칸(decode 때 더 자랄 공간), 지금 5칸 채움 */}
@@ -837,7 +1156,9 @@ const SceneAttention = () => {
   return (
     <SceneWrap dur={S.attention}>
       <TwoLayer
-        label="⑦ 어텐션 = 실제 내적 + softmax"
+        label="⑥ 어텐션 = 실제 내적 + softmax"
+        stage={2}
+        subStage="어텐션"
         badge={{ text: "PREFILL", color: theme.colors.accent }}
         top={
           <div style={{ height: "100%", paddingTop: 30 }}>
@@ -1004,6 +1325,7 @@ const SceneLogits = () => {
     <SceneWrap dur={S.logits}>
       <TwoLayer
         label="⑧ 다음 토큰 예측 — argmax"
+        stage={3}
         badge={{ text: "PREFILL", color: theme.colors.accent }}
         top={
           <div style={{ height: "100%", paddingTop: 30 }}>
@@ -1106,6 +1428,7 @@ const SceneFirstToken = () => {
     <SceneWrap dur={S.first}>
       <TwoLayer
         label="prefill 끝 — 첫 토큰 완성"
+        stage={4}
         top={
           <div style={{ height: "100%", paddingTop: 30 }}>
             <ChatPanel
@@ -1152,11 +1475,12 @@ const SCENE_LIST: { dur: number; Comp: React.FC }[] = [
   { dur: S.intro, Comp: SceneIntro },
   { dur: S.tokenize, Comp: SceneTokenize },
   { dur: S.prefill, Comp: ScenePrefill },
+  { dur: S.layers, Comp: SceneLayers }, // 모델 구조 지도 (전체를 먼저)
   { dur: S.numbers, Comp: SceneNumbers },
   { dur: S.rmsnorm, Comp: SceneRMSNorm },
-  { dur: S.layers, Comp: SceneLayers },
-  { dur: S.kv, Comp: SceneKV },
+  { dur: S.kvgen, Comp: SceneKVGen },
   { dur: S.attention, Comp: SceneAttention },
+  { dur: S.kv, Comp: SceneKV }, // KV 캐시는 어텐션 뒤 (저장 이유가 분명해진 뒤)
   { dur: S.logits, Comp: SceneLogits },
   { dur: S.first, Comp: SceneFirstToken },
 ];
