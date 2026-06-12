@@ -1,5 +1,7 @@
 # oh-my-videoagent
 
+> 👉 **시작하려면 우측 상단 초록 `Use this template` 버튼** (또는 [여기](https://github.com/FREEDOBY/oh-my-vedioagent/generate))로 내 저장소를 만드세요.
+
 > **Claude Code로 "어떤 자료든" 모션 그래픽 설명 영상으로 바꾸는 템플릿.**
 > 3Blue1Brown · Fireship 스타일의 시각화를, 영상 편집 없이 **코드 + AI 에이전트**로 만듭니다.
 
