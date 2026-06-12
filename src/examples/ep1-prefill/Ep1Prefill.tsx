@@ -715,61 +715,81 @@ const SceneRMSNorm = () => {
   );
 };
 
-// ============================ 장면 4: 레이어 통과 (줌인) ============================
-// 한 레이어(트랜스포머 블록) 내부 연산. 임베딩은 레이어가 아니라 진입 전 1회이므로 제외.
-// Llama 디코더 블록 구조 (reference.py: input_layernorm→self_attn→+residual→post_attention_layernorm→mlp→+residual, ×16, 그 위 norm→lm_head)
+// ============================ 장면 4: 모델 구조 — 골격 먼저 ============================
+// 아직 설명하지 않은 내부 연산(lm_head / argmax / SwiGLU 등)은 박스로 노출하지 않는다.
+// 골격(임베딩 → 트랜스포머 블록 ×16 → 다음 토큰 예측)만 보여주고,
+// 블록 내부(norm·어텐션·FFN)는 다음 씬들에서 한 겹씩 펼친다. (reference.py 디코더 블록 ×16)
 const SceneLayers = () => {
   const frame = useCurrentFrame();
   const { width } = useVideoConfig();
   const cx = width / 2;
 
-  const boxH = 40;
-  const pitch = 54;
-  const yc = (i: number) => 170 + i * pitch; // 박스 i의 중심 y (0=위, 10=아래)
+  // 노드 중심 y (세로로 넉넉히 — 캡션과 안 겹치게)
+  const yEntry = 96; // "입력 토큰들" 텍스트
+  const yEmb = 184; // 토큰 임베딩 박스
+  const yBlock = 392; // 트랜스포머 블록 ×16 (큰 박스)
+  const yPred = 588; // 다음 토큰 예측 박스
+  const yOut = 686; // 결과 '서'
 
-  type Row = { id: string; label: string; w: number; color: string; fill?: boolean; add?: boolean; big?: boolean };
-  const ROWS: Row[] = [
-    { id: "out", label: "다음 토큰  '서'", w: 250, color: theme.colors.accent2, fill: true, big: true },
-    { id: "softmax", label: "Softmax", w: 200, color: theme.colors.accent2 },
-    { id: "linear", label: "Linear  (lm_head)", w: 270, color: theme.colors.muted },
-    { id: "fnorm", label: "최종 RMSNorm", w: 250, color: theme.colors.warn },
-    { id: "add2", label: "⊕", w: 60, color: theme.colors.text, add: true },
-    { id: "ffn", label: "Feed-Forward  (SwiGLU)", w: 420, color: theme.colors.accent },
-    { id: "norm2", label: "RMSNorm", w: 220, color: theme.colors.warn },
-    { id: "add1", label: "⊕", w: 60, color: theme.colors.text, add: true },
-    { id: "attn", label: "Self-Attention  ·  RoPE · causal · KV캐시", w: 540, color: theme.colors.accent },
-    { id: "norm1", label: "RMSNorm", w: 220, color: theme.colors.warn },
-    { id: "emb", label: "토큰 임베딩", w: 250, color: theme.colors.danger, fill: true },
-  ];
-  const idx = (id: string) => ROWS.findIndex((r) => r.id === id);
+  const boxW = 360;
+  const boxH = 64;
+  const blockW = 460;
+  const blockH = 188;
 
-  // 구조 등장 (아래→위 스태거)
-  const appear = (i: number) =>
-    interpolate(frame, [10 + (10 - i) * 5, 46 + (10 - i) * 5], [0, 1], {
+  const appear = (t: number) =>
+    interpolate(frame, [t, t + 22], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+
+  // 흐름 신호: 임베딩 → 예측 (위→아래)
+  const sigY = interpolate(frame, [150, 360], [yEmb, yPred], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+
+  // 블록 내부 미리보기: 4개 라벨이 하나씩 켜짐 = "이걸 지금부터 펼친다" 예고
+  const INNER = ["RMSNorm", "Self-Attention", "RMSNorm", "FFN (SwiGLU)"];
+  const innerShown = Math.floor(
+    interpolate(frame, [400, 640], [0, INNER.length + 0.5], {
       extrapolateLeft: "clamp",
       extrapolateRight: "clamp",
-    });
-  // 데이터 흐름 신호: 임베딩(i=10, 아래) → 출력(i=0, 위)
-  const sig = interpolate(frame, [110, 560], [10.6, -0.6], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
-  const lit = (i: number) => sig <= i + 0.5;
-  const cur = (i: number) => Math.abs(i - sig) < 0.55;
+    })
+  );
 
-  // ×16 컨테이너 (add2~norm1 감쌈)
-  const blkW = 580;
-  const blkTop = yc(idx("add2")) - boxH / 2 - 14;
-  const blkBot = yc(idx("norm1")) + boxH / 2 + 14;
-  const blkH = blkBot - blkTop;
-
-  // residual 스킵 좌표
-  const entryY = (yc(idx("norm1")) + yc(idx("emb"))) / 2; // 블록 입력
-  const add1Y = yc(idx("add1"));
-  const add2Y = yc(idx("add2"));
-  const sigYclamped = yc(Math.max(0, Math.min(10, sig)));
+  const Box: React.FC<{
+    y: number;
+    w: number;
+    h: number;
+    color: string;
+    op: number;
+    cur?: boolean;
+    children: React.ReactNode;
+  }> = ({ y, w, h, color, op, cur, children }) => (
+    <div
+      style={{
+        position: "absolute",
+        left: cx - w / 2,
+        top: y - h / 2,
+        width: w,
+        height: h,
+        borderRadius: 14,
+        border: `2px solid ${cur ? theme.colors.warn : color}`,
+        backgroundColor: cur ? theme.colors.warn + "1e" : theme.colors.surface,
+        boxShadow: cur ? `0 0 22px ${theme.colors.warn}66` : "none",
+        opacity: op,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 3,
+      }}
+    >
+      {children}
+    </div>
+  );
 
   return (
     <SceneWrap dur={S.layers}>
       <TwoLayer
-        label="모델 구조 — 한 토큰이 통과할 전체 길"
+        label="모델 구조 — 토큰이 지나갈 길 (골격)"
         badge={{ text: "PREFILL", color: theme.colors.accent }}
         top={
           <div style={{ height: "100%", paddingTop: 30 }}>
@@ -778,131 +798,159 @@ const SceneLayers = () => {
         }
         bottom={
           <AbsoluteFill>
-            {/* 흐름 스파인 + residual 스킵 */}
+            {/* 세로 흐름 스파인 (회색 전체 + 파란 진행) */}
             <svg style={{ position: "absolute", inset: 0 }} width="100%" height="100%">
-              <line x1={cx} y1={yc(idx("emb"))} x2={cx} y2={yc(0)} stroke={theme.colors.border} strokeWidth={4} />
-              <line x1={cx} y1={yc(idx("emb"))} x2={cx} y2={sigYclamped} stroke={theme.colors.accent} strokeWidth={4} />
-              {/* attn residual: 블록 입력 → ⊕(add1) */}
-              <path
-                d={`M ${cx} ${entryY} C ${cx + 380} ${entryY}, ${cx + 380} ${add1Y}, ${cx + 42} ${add1Y}`}
-                fill="none"
-                stroke={theme.colors.accent2}
-                strokeWidth={3}
-                opacity={appear(idx("add1"))}
-              />
-              <polygon points={`${cx + 42},${add1Y} ${cx + 56},${add1Y - 7} ${cx + 56},${add1Y + 7}`} fill={theme.colors.accent2} opacity={appear(idx("add1"))} />
-              {/* ffn residual: add1 출력 → ⊕(add2) */}
-              <path
-                d={`M ${cx} ${add1Y} C ${cx + 470} ${add1Y}, ${cx + 470} ${add2Y}, ${cx + 42} ${add2Y}`}
-                fill="none"
-                stroke={theme.colors.accent2}
-                strokeWidth={3}
-                opacity={appear(idx("add2"))}
-              />
-              <polygon points={`${cx + 42},${add2Y} ${cx + 56},${add2Y - 7} ${cx + 56},${add2Y + 7}`} fill={theme.colors.accent2} opacity={appear(idx("add2"))} />
+              <line x1={cx} y1={yEntry + 14} x2={cx} y2={yOut} stroke={theme.colors.border} strokeWidth={4} />
+              <line x1={cx} y1={yEmb} x2={cx} y2={sigY} stroke={theme.colors.accent} strokeWidth={4} />
             </svg>
 
-            {/* ×16 고스트 스택 + 컨테이너 */}
-            {[16, 8].map((g, k) => (
+            {/* 입력 토큰들 */}
+            <div
+              style={{
+                position: "absolute",
+                top: yEntry - 16,
+                width: "100%",
+                textAlign: "center",
+                fontSize: 22,
+                fontWeight: 700,
+                color: theme.colors.muted,
+                fontFamily: theme.fonts.sans,
+                opacity: appear(20),
+              }}
+            >
+              입력 토큰들 (5개)
+            </div>
+
+            {/* 토큰 임베딩 */}
+            <Box y={yEmb} w={boxW} h={boxH} color={theme.colors.danger} op={appear(60)} cur={Math.abs(sigY - yEmb) < 60}>
+              <div style={{ fontSize: 22, fontWeight: 800, color: theme.colors.text, fontFamily: theme.fonts.sans }}>
+                토큰 임베딩
+              </div>
+              <div style={{ fontSize: 15, color: theme.colors.muted, marginTop: 2 }}>토큰 → 숫자 벡터 (진입 전 1회)</div>
+            </Box>
+
+            {/* ×16 고스트 스택 (반복 암시) */}
+            {[2, 1].map((k) => (
               <div
                 key={k}
                 style={{
                   position: "absolute",
-                  left: cx - blkW / 2 - (k + 1) * 9,
-                  top: blkTop - (k + 1) * 9,
-                  width: blkW,
-                  height: blkH,
+                  left: cx - blockW / 2 + k * 10,
+                  top: yBlock - blockH / 2 - k * 10,
+                  width: blockW,
+                  height: blockH,
                   borderRadius: 16,
                   border: `2px solid ${theme.colors.border}`,
-                  opacity: 0.4 * appear(idx("add2")),
+                  opacity: 0.45 * appear(120),
+                  zIndex: 2,
                 }}
               />
             ))}
+
+            {/* 트랜스포머 블록 ×16 (내부 미리보기) */}
             <div
               style={{
                 position: "absolute",
-                left: cx - blkW / 2,
-                top: blkTop,
-                width: blkW,
-                height: blkH,
+                left: cx - blockW / 2,
+                top: yBlock - blockH / 2,
+                width: blockW,
+                height: blockH,
                 borderRadius: 16,
-                border: `2px solid ${theme.colors.accent}77`,
-                backgroundColor: "rgba(88,166,255,0.05)",
-                opacity: appear(idx("add2")),
+                border: `2px solid ${theme.colors.accent}`,
+                backgroundColor: "rgba(88,166,255,0.06)",
+                boxShadow: Math.abs(sigY - yBlock) < 90 ? `0 0 26px ${theme.colors.warn}55` : "none",
+                opacity: appear(120),
+                zIndex: 3,
+                padding: "14px 0",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                gap: 7,
               }}
-            />
-            {/* ×16 라벨 (왼쪽) */}
+            >
+              <div style={{ fontSize: 20, fontWeight: 800, color: theme.colors.text, fontFamily: theme.fonts.sans }}>
+                트랜스포머 블록
+              </div>
+              {INNER.map((t, i) => {
+                const on = i < innerShown;
+                return (
+                  <div
+                    key={t}
+                    style={{
+                      fontSize: 17,
+                      fontFamily: theme.fonts.mono,
+                      fontWeight: on ? 700 : 500,
+                      color: on ? theme.colors.accent2 : theme.colors.border,
+                      opacity: appear(140),
+                    }}
+                  >
+                    {on ? "▸ " : "· "}
+                    {t}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* ×16 라벨 + 루프 (오른쪽) */}
             <div
               style={{
                 position: "absolute",
-                left: cx - blkW / 2 - 150,
-                top: blkTop + blkH / 2 - 34,
-                width: 130,
-                textAlign: "right",
-                opacity: appear(idx("add2")),
+                left: cx + blockW / 2 + 28,
+                top: yBlock - 50,
+                width: 220,
+                opacity: appear(150),
               }}
             >
-              <div style={{ fontSize: 44, fontWeight: 900, color: theme.colors.accent, fontFamily: theme.fonts.mono, lineHeight: 1 }}>×16</div>
-              <div style={{ fontSize: 16, color: theme.colors.muted, marginTop: 4 }}>같은 블록 16번</div>
-              <div style={{ fontSize: 15, color: theme.colors.warn, marginTop: 10 }}>프리노름 — 노름을<br />블록 안에서 먼저</div>
+              <div style={{ fontSize: 48, fontWeight: 900, color: theme.colors.accent, fontFamily: theme.fonts.mono, lineHeight: 1 }}>
+                ×16 ↺
+              </div>
+              <div style={{ fontSize: 17, color: theme.colors.muted, marginTop: 6 }}>같은 블록을 16번 반복</div>
+              <div style={{ fontSize: 15, color: theme.colors.warn, marginTop: 8 }}>내부는 지금부터 한 겹씩 펼침</div>
             </div>
 
-            {/* residual 라벨 (오른쪽) */}
+            {/* 다음 토큰 예측 */}
+            <Box y={yPred} w={boxW} h={boxH} color={theme.colors.accent2} op={appear(200)} cur={Math.abs(sigY - yPred) < 60}>
+              <div style={{ fontSize: 22, fontWeight: 800, color: theme.colors.text, fontFamily: theme.fonts.sans }}>
+                다음 토큰 예측
+              </div>
+              <div style={{ fontSize: 15, color: theme.colors.muted, marginTop: 2, fontFamily: theme.fonts.mono }}>
+                최종 norm → lm_head → argmax
+              </div>
+            </Box>
+
+            {/* 결과 '서' */}
             <div
               style={{
                 position: "absolute",
-                left: cx + 490,
-                top: (add1Y + add2Y) / 2 - 26,
-                width: 150,
-                fontSize: 17,
-                color: theme.colors.accent2,
-                fontFamily: theme.fonts.sans,
-                opacity: appear(idx("add1")),
+                top: yOut - 4,
+                width: "100%",
+                textAlign: "center",
+                opacity: appear(250),
               }}
             >
-              <b>residual</b>
-              <br />입력을 그대로 더함
+              <span
+                style={{
+                  fontSize: 30,
+                  fontWeight: 900,
+                  color: theme.colors.warn,
+                  fontFamily: theme.fonts.sans,
+                  padding: "4px 18px",
+                  borderRadius: 10,
+                  backgroundColor: theme.colors.warn + "22",
+                  border: `2px solid ${theme.colors.warn}`,
+                }}
+              >
+                '서'
+              </span>
             </div>
 
-            <Caption bottom={26}>
-              <span style={{ whiteSpace: "nowrap" }}>먼저 전체 구조부터 —</span>{" "}
-              <span style={{ whiteSpace: "nowrap" }}>지금부터 이 길을 <span style={{ color: theme.colors.accent2 }}>아래에서 위로</span> 하나씩 따라간다</span>
+            <Caption bottom={34}>
+              <span style={{ whiteSpace: "nowrap" }}>먼저 길 전체만 —</span>{" "}
+              <span style={{ whiteSpace: "nowrap" }}>
+                이 <span style={{ color: theme.colors.accent }}>블록 안</span>을 지금부터{" "}
+                <span style={{ color: theme.colors.accent2 }}>한 겹씩</span> 펼친다
+              </span>
             </Caption>
-
-            {/* 박스들 */}
-            {ROWS.map((r, i) => {
-              const on = lit(i);
-              const isCur = cur(i);
-              const bc = isCur ? theme.colors.warn : on ? r.color : theme.colors.border;
-              return (
-                <div
-                  key={r.id}
-                  style={{
-                    position: "absolute",
-                    left: cx - r.w / 2,
-                    top: yc(i) - boxH / 2,
-                    width: r.w,
-                    height: boxH,
-                    borderRadius: r.add ? "50%" : 10,
-                    border: `2px solid ${bc}`,
-                    backgroundColor: r.fill ? r.color + "22" : isCur ? theme.colors.warn + "22" : theme.colors.surface,
-                    boxShadow: isCur ? `0 0 18px ${theme.colors.warn}` : "none",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    fontFamily: theme.fonts.sans,
-                    fontWeight: r.big ? 800 : 700,
-                    fontSize: r.add ? 24 : r.big ? 22 : 18,
-                    color: on || r.fill ? theme.colors.text : theme.colors.muted,
-                    opacity: appear(i),
-                    whiteSpace: "nowrap",
-                    zIndex: 3,
-                  }}
-                >
-                  {r.label}
-                </div>
-              );
-            })}
 
             <SpecChips />
           </AbsoluteFill>
@@ -1304,22 +1352,34 @@ const SceneLogits = () => {
   const frame = useCurrentFrame();
   const { width, fps } = useVideoConfig();
 
-  const grow = interpolate(frame, [60, 180], [0, 1], {
+  // 브릿지 컷: ?벡터 × lm_head = logits (막대가 자라기 전 앞부분)
+  const BR = 170;
+  const bridgeOp = interpolate(frame, [0, 24, BR - 26, BR], [0, 1, 1, 0], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+  const bStep = (t: number) =>
+    interpolate(frame, [t, t + 22], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+
+  const grow = interpolate(frame, [BR, BR + 120], [0, 1], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
   // 스캐너가 좌→우로 훑기
-  const scan = interpolate(frame, [220, 520], [0, VOCAB_BARS - 1], {
+  const scan = interpolate(frame, [BR + 60, BR + 360], [0, VOCAB_BARS - 1], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
   const scanned = Math.floor(scan);
-  const winnerFound = frame > 540;
-  const winnerPop = spring({ frame: frame - 540, fps, config: { damping: 10 } });
+  const winnerFound = frame > BR + 380;
+  const winnerPop = spring({ frame: frame - (BR + 380), fps, config: { damping: 10 } });
 
   const barAreaW = width * 0.82;
   const barGap = 4;
   const barW = barAreaW / VOCAB_BARS - barGap;
+
+  // '?' 토큰의 최종 벡터 (예시 4개 / 실제 2048)
+  const Q_LAST = [0.31, -0.82, 0.55, 0.12];
 
   return (
     <SceneWrap dur={S.logits}>
@@ -1352,6 +1412,7 @@ const SceneLogits = () => {
                 gap: barGap,
                 height: 280,
                 width: barAreaW,
+                opacity: grow > 0 ? 1 : 0,
               }}
             >
               {Array.from({ length: VOCAB_BARS }).map((_, i) => {
@@ -1405,11 +1466,89 @@ const SceneLogits = () => {
               })}
             </div>
 
+            <div style={{ fontSize: 18, color: theme.colors.muted, marginTop: 14, fontFamily: theme.fonts.mono, opacity: grow > 0 ? 1 : 0 }}>
+              (48개만 표시 · 실제 128256개)
+            </div>
+
             {winnerFound && (
               <Caption bottom={70}>
                 가장 점수 높은 1등 = <span style={{ color: theme.colors.warn }}>'서'</span> · 첫 글자가 채팅에 찍힌다
               </Caption>
             )}
+
+            {/* 브릿지 컷: '?' 토큰의 최종 벡터가 lm_head 행렬곱으로 12만 점수가 된다 */}
+            {frame < BR && (
+              <AbsoluteFill
+                style={{
+                  alignItems: "center",
+                  justifyContent: "center",
+                  opacity: bridgeOp,
+                  backgroundColor: "#0a0e14",
+                }}
+              >
+                <div style={{ fontSize: 26, color: theme.colors.muted, marginBottom: 34, textAlign: "center" }}>
+                  16개 블록을 다 지난 <span style={{ color: theme.colors.warn, fontWeight: 700 }}>'?'</span> 토큰의 벡터가 점수가 된다
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center" }}>
+                  <NumVector
+                    values={Q_LAST}
+                    tag="? 벡터"
+                    tagColor={theme.colors.warn}
+                    format={fmt}
+                    trailingDim={2048}
+                    cellW={62}
+                    cellH={46}
+                    fontSize={20}
+                    opacity={bStep(20)}
+                  />
+                  <Op>×</Op>
+                  <div
+                    style={{
+                      opacity: bStep(64),
+                      textAlign: "center",
+                      padding: "16px 26px",
+                      borderRadius: 12,
+                      border: `2px solid ${theme.colors.accent}`,
+                      backgroundColor: "rgba(88,166,255,0.06)",
+                      fontFamily: theme.fonts.sans,
+                    }}
+                  >
+                    <div style={{ fontSize: 24, fontWeight: 800, color: theme.colors.accent, fontFamily: theme.fonts.mono }}>
+                      lm_head
+                    </div>
+                    <div style={{ fontSize: 20, color: theme.colors.text, marginTop: 4, fontFamily: theme.fonts.mono }}>
+                      2048 × 128256
+                    </div>
+                    <div style={{ fontSize: 15, color: theme.colors.muted, marginTop: 4 }}>학습된 단어장 행렬</div>
+                  </div>
+                  <Op>=</Op>
+                  <div style={{ opacity: bStep(108), textAlign: "center" }}>
+                    <div style={{ display: "flex", alignItems: "flex-end", gap: 4, height: 64, justifyContent: "center" }}>
+                      {[34, 52, 28, 60, 40, 95, 30, 48, 24, 56].map((h, i) => (
+                        <div
+                          key={i}
+                          style={{
+                            width: 12,
+                            height: `${h}%`,
+                            borderRadius: 3,
+                            backgroundColor: i === 5 ? theme.colors.warn : theme.colors.border,
+                          }}
+                        />
+                      ))}
+                    </div>
+                    <div style={{ fontSize: 17, color: theme.colors.muted, marginTop: 8, fontFamily: theme.fonts.mono }}>
+                      logits · 12만 점수
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ fontSize: 20, color: theme.colors.accent2, marginTop: 30, opacity: bStep(140) }}>
+                  ↓ 이 12만 점수를 펼쳐 1등을 찾는다 ↓
+                </div>
+              </AbsoluteFill>
+            )}
+
             <SpecChips />
           </AbsoluteFill>
         }

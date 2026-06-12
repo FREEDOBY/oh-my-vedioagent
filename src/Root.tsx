@@ -1,7 +1,7 @@
 import "./index.css";
 import { Composition, Folder } from "remotion";
 import { VIDEO_CONFIG } from "./theme";
-import { Ep1Prefill, EP1_DURATION } from "./videos/ep1-prefill/Ep1Prefill";
+import { Ep1Prefill, EP1_DURATION } from "./examples/ep1-prefill/Ep1Prefill";
 
 // 각 영상은 독립적인 <Composition> 입니다. 따로 미리보기/렌더링됩니다.
 //   npx remotion render Ep1-Prefill
